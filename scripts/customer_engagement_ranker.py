@@ -400,6 +400,53 @@ def _token_set(s: str) -> Set[str]:
     return set([t for t in _normalize_name(s).split(" ") if t])
 
 
+_MATCH_STOPWORDS: Set[str] = {
+    # Generic dental/practice words that cause false-positive matches
+    "dental",
+    "dentistry",
+    "dentist",
+    "care",
+    "family",
+    "smile",
+    "smiles",
+    "clinic",
+    "center",
+    "centre",
+    "group",
+    "associates",
+    "associate",
+    "office",
+    "offices",
+    "health",
+    "services",
+    "service",
+    "cosmetic",
+    "implant",
+    "implants",
+    "emergency",
+    "kids",
+    "pediatric",
+    "orthodontics",
+    "orthodontic",
+    "endodontics",
+    "endodontic",
+    "periodontics",
+    "periodontic",
+    "oral",
+    "surgery",
+    "specialists",
+    "specialist",
+    "and",
+    "of",
+    "the",
+}
+
+
+def _meaningful_tokens(name: str) -> Set[str]:
+    """Tokens for matching, with generic stopwords removed."""
+    return {t for t in _token_set(name) if t not in _MATCH_STOPWORDS}
+
+
 @dataclass
 class CompanyRow:
     hubspot_company_id: str
@@ -497,7 +544,7 @@ def _pick_tenant_for_company(
 
     c_domain = _normalize_domain(company.domain)
     c_name_norm = _normalize_name(company.name)
-    c_tokens = _token_set(company.name)
+    c_tokens = _meaningful_tokens(company.name)
 
     # domain match if tenant has any domain-like field
     if c_domain:
@@ -531,13 +578,17 @@ def _pick_tenant_for_company(
         tn = str(t.get("tenant_name") or t.get("name") or "").strip()
         if not tn:
             continue
-        t_tokens = _token_set(tn)
+        t_tokens = _meaningful_tokens(tn)
         if not t_tokens or not c_tokens:
             continue
         overlap = len(c_tokens & t_tokens)
         denom = max(len(c_tokens), len(t_tokens))
         score = overlap / float(denom)
-        if overlap >= 2 and score >= 0.5:
+        # Require stronger signal when we have enough meaningful tokens
+        min_overlap = 1
+        if len(c_tokens) >= 2 and len(t_tokens) >= 2:
+            min_overlap = 2
+        if overlap >= min_overlap and score >= 0.5:
             scored.append((score, int(tid)))
 
     if scored:
@@ -928,6 +979,18 @@ def main() -> int:
         f"Active filter: active_companies={len(active_mapped)} inactive_companies={len(inactive_mapped)} "
         f"(threshold>{cfg.active_calls_threshold} calls in {cfg.active_calls_period})"
     )
+
+    # Helpful debug for allowlist runs: show mapping + active call counts
+    if cfg.company_ids_allowlist:
+        print("Allowlist debug (company -> tenant -> active calls):")
+        for c, tid, why in mapped:
+            calls_30 = _safe_int(calls_active_window_by_tid.get(int(tid), 0))
+            active = "ACTIVE" if int(tid) in active_tenant_ids else "INACTIVE"
+            tenant_name = metrics_by_tid.get(int(tid)).tenant_name if metrics_by_tid.get(int(tid)) else f"tenant_{tid}"
+            print(
+                f"- company_id={c.hubspot_company_id} name={c.name!r} domain={c.domain!r} "
+                f"=> tenant_id={tid} tenant_name={tenant_name!r} match={why} calls={calls_30} {active}"
+            )
 
     # Build scored list (only active + those with tenant metrics present)
     scored: List[Dict[str, Any]] = []

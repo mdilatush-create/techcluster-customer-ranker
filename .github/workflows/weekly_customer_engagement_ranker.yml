@@ -80,8 +80,8 @@ jobs:
           YOBI_PASSWORD: ${{ secrets.YOBI_PASSWORD }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           UNIVERSE: ${{ github.event_name == 'schedule' && 'hubspot' || inputs.universe }}
-          DRY_RUN: ${{ github.event_name == 'schedule' && 'true' || inputs.dry_run }}
-          FULL_WRITE: ${{ github.event_name == 'schedule' && 'false' || inputs.full_write }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
+          FULL_WRITE: ${{ github.event_name == 'schedule' && 'true' || inputs.full_write }}
           COMPANY_IDS: ${{ github.event_name == 'schedule' && '' || inputs.company_ids }}
           MAX_COMPANIES: ${{ github.event_name == 'schedule' && '5000' || inputs.max_companies }}
           MAX_CONTACT_PAGES: ${{ github.event_name == 'schedule' && '200' || inputs.max_contact_pages }}

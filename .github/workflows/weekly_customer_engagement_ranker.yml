@@ -3,6 +3,14 @@ name: Weekly customer engagement ranker
 on:
   workflow_dispatch:
     inputs:
+      universe:
+        description: "Customer universe: hubspot (default) or yobi (all tenants)"
+        required: true
+        default: "hubspot"
+        type: choice
+        options:
+          - "hubspot"
+          - "yobi"
       dry_run:
         description: "Dry run (no HubSpot writes)"
         required: true
@@ -58,6 +66,7 @@ jobs:
           YOBI_EMAIL: ${{ secrets.YOBI_EMAIL }}
           YOBI_PASSWORD: ${{ secrets.YOBI_PASSWORD }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          UNIVERSE: ${{ github.event_name == 'schedule' && 'hubspot' || inputs.universe }}
           DRY_RUN: ${{ github.event_name == 'schedule' && 'true' || inputs.dry_run }}
           COMPANY_IDS: ${{ github.event_name == 'schedule' && '' || inputs.company_ids }}
           MAX_COMPANIES: ${{ github.event_name == 'schedule' && '250' || inputs.max_companies }}

@@ -72,6 +72,7 @@ def _utc_now() -> datetime:
 
 @dataclass(frozen=True)
 class Config:
+    universe: str  # "hubspot" or "yobi"
     hubspot_access_token: str
     yobi_email: str
     yobi_password: str
@@ -90,6 +91,9 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
+        universe = (os.environ.get("UNIVERSE") or "hubspot").strip().lower() or "hubspot"
+        if universe not in ("hubspot", "yobi"):
+            universe = "hubspot"
         hubspot_access_token = os.environ.get("HUBSPOT_ACCESS_TOKEN", "").strip()
         yobi_email = os.environ.get("YOBI_EMAIL", "").strip()
         yobi_password = os.environ.get("YOBI_PASSWORD", "").strip()
@@ -122,6 +126,7 @@ class Config:
                 tenant_mapping_overrides = {}
 
         return cls(
+            universe=universe,
             hubspot_access_token=hubspot_access_token,
             yobi_email=yobi_email,
             yobi_password=yobi_password,
@@ -727,15 +732,9 @@ def _fetch_yobi_metrics(cfg: Config, yobi: YobiClient) -> Tuple[List[Dict[str, A
     appt_rows = _parse_appointments_by_location(appt_raw)
     appts_total_by_tid, appts_newp_by_tid = _aggregate_appointments_by_tenant(appt_rows=appt_rows)
 
-    # Build metrics objects for every tenant we have any data for
-    all_tids: Set[int] = set()
-    all_tids.update([int(x) for x in calls_by_tid.keys()])
-    all_tids.update([int(x) for x in tasks_by_tid.keys()])
-    all_tids.update([int(x) for x in appts_total_by_tid.keys()])
-    all_tids.update([int(x) for x in appts_newp_by_tid.keys()])
-
+    # Build metrics objects for all tenants (zeros if missing)
     metrics_by_tid: Dict[int, TenantMetrics] = {}
-    for tid in sorted(all_tids):
+    for tid in sorted(tenants_by_id.keys()):
         t = tenants_by_id.get(tid, {})
         t_name = str(t.get("tenant_name") or t.get("tenantName") or t.get("name") or f"tenant_{tid}")
         metrics_by_tid[tid] = TenantMetrics(
@@ -766,13 +765,15 @@ def _send_slack(webhook_url: str, text: str) -> None:
 def main() -> int:
     cfg = Config.from_env()
 
-    missing = [k for k in ("HUBSPOT_ACCESS_TOKEN", "YOBI_EMAIL", "YOBI_PASSWORD") if not os.environ.get(k)]
+    required = ["YOBI_EMAIL", "YOBI_PASSWORD"]
+    if cfg.universe == "hubspot":
+        required = ["HUBSPOT_ACCESS_TOKEN", "YOBI_EMAIL", "YOBI_PASSWORD"]
+    missing = [k for k in required if not os.environ.get(k)]
     if missing:
         print("Missing required secrets:", ", ".join(missing))
         # In scheduled automation we want failures visible; but keep exit 0 for now until fully live.
         return 0
 
-    hubspot = HubSpotClient(cfg.hubspot_access_token)
     yobi = YobiClient(email=cfg.yobi_email, password=cfg.yobi_password, base_url=cfg.yobi_base_url)
 
     print(
@@ -782,7 +783,12 @@ def main() -> int:
         f" allowlist={len(cfg.company_ids_allowlist)}"
         f" tz={cfg.timezone_name}"
         f" active_calls={cfg.active_calls_threshold}+/{cfg.active_calls_period}"
+        f" universe={cfg.universe}"
     )
+
+    if cfg.universe == "yobi" and not cfg.dry_run:
+        print("ERROR: UNIVERSE=yobi supports dry-run only (no HubSpot writes).")
+        return 1
 
     # Fail fast on Yobi auth (avoids doing HubSpot work when creds are wrong)
     try:
@@ -792,14 +798,6 @@ def main() -> int:
         print(f"Details: {e}")
         return 1
 
-    # Validate HubSpot properties exist
-    _validate_hubspot_properties(hubspot)
-
-    # Load target companies
-    companies = _load_companies_from_hubspot(cfg, hubspot)
-    companies = [c for c in companies if c.hubspot_company_id]  # safety
-    print(f"Loaded {len(companies)} HubSpot companies to consider.")
-
     # Fetch Yobi stats
     try:
         tenants, metrics_by_tid, yobi_anomalies = _fetch_yobi_metrics(cfg, yobi)
@@ -808,6 +806,66 @@ def main() -> int:
         print(f"Details: {e}")
         return 1
     print(f"Loaded {len(tenants)} Yobi tenants; metrics available for {len(metrics_by_tid)} tenants.")
+
+    # Determine "active" tenants by call volume (previous 30 days by default)
+    try:
+        active_calls_raw = yobi.calls_by_tenant(period=cfg.active_calls_period)
+        calls_active_window_by_tid = _parse_calls_by_tenant(active_calls_raw)
+    except Exception as e:
+        print("ERROR: Failed to fetch Yobi calls-by-tenant for active filter.")
+        print(f"Details: {e}")
+        return 1
+
+    active_tenant_ids: Set[int] = {
+        int(tid) for tid, calls in calls_active_window_by_tid.items() if _safe_int(calls) > cfg.active_calls_threshold
+    }
+
+    if cfg.universe == "yobi":
+        # Rank all Yobi tenants (active only by default)
+        active_metrics: List[TenantMetrics] = [m for tid, m in metrics_by_tid.items() if int(tid) in active_tenant_ids]
+        inactive_count = len(metrics_by_tid) - len(active_metrics)
+        print(
+            f"Active filter (Yobi universe): active_tenants={len(active_metrics)} inactive_tenants={inactive_count} "
+            f"(threshold>{cfg.active_calls_threshold} calls in {cfg.active_calls_period})"
+        )
+
+        active_metrics.sort(
+            key=lambda m: (-m.new_patient_appointments, -m.total_appointments, -m.tasks_created, -m.total_calls, m.tenant_id)
+        )
+
+        n = len(active_metrics)
+        if n == 0:
+            print("No active tenants to rank.")
+            return 0
+
+        print("Preview (top 10 tenants):")
+        for idx, m in enumerate(active_metrics[:10], start=1):
+            print(
+                f"{idx:>3} | score={m.score:<6} tier={_tier_for_rank(idx, n):<10} "
+                f"calls={m.total_calls:<4} tasks={m.tasks_created:<4} appts={m.total_appointments:<4} newp={m.new_patient_appointments:<4} "
+                f"| {m.tenant_name} (tenant_id={m.tenant_id})"
+            )
+
+        print("Preview (bottom 10 tenants):")
+        start_rank = max(1, n - 9)
+        for idx, m in enumerate(active_metrics[-10:], start=start_rank):
+            print(f"{idx:>3} | score={m.score:<6} | {m.tenant_name} (tenant_id={m.tenant_id})")
+
+        if yobi_anomalies:
+            for a in yobi_anomalies:
+                print("ANOMALY:", a)
+        return 0
+
+    # HubSpot universe below
+    hubspot = HubSpotClient(cfg.hubspot_access_token)
+
+    # Validate HubSpot properties exist
+    _validate_hubspot_properties(hubspot)
+
+    # Load target companies
+    companies = _load_companies_from_hubspot(cfg, hubspot)
+    companies = [c for c in companies if c.hubspot_company_id]  # safety
+    print(f"Loaded {len(companies)} HubSpot companies to consider.")
 
     # Map companies to tenant_ids
     mapped: List[Tuple[CompanyRow, int, str]] = []
@@ -824,19 +882,6 @@ def main() -> int:
         print("Unmapped examples:")
         for c, reason in unmapped[:10]:
             print(f"- company_id={c.hubspot_company_id} name={c.name!r} domain={c.domain!r} reason={reason}")
-
-    # Determine "active" tenants by call volume (previous 30 days by default)
-    try:
-        active_calls_raw = yobi.calls_by_tenant(period=cfg.active_calls_period)
-        calls_active_window_by_tid = _parse_calls_by_tenant(active_calls_raw)
-    except Exception as e:
-        print("ERROR: Failed to fetch Yobi calls-by-tenant for active filter.")
-        print(f"Details: {e}")
-        return 1
-
-    active_tenant_ids: Set[int] = {
-        int(tid) for tid, calls in calls_active_window_by_tid.items() if _safe_int(calls) > cfg.active_calls_threshold
-    }
 
     inactive_mapped: List[Tuple[CompanyRow, int]] = [(c, tid) for (c, tid, _) in mapped if int(tid) not in active_tenant_ids]
     active_mapped: List[Tuple[CompanyRow, int, str]] = [(c, tid, why) for (c, tid, why) in mapped if int(tid) in active_tenant_ids]

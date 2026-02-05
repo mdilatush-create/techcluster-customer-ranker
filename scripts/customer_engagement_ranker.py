@@ -80,7 +80,9 @@ class Config:
 
     timezone_name: str
     dry_run: bool
+    full_write: bool
     max_companies: int
+    max_contact_pages: int
     company_ids_allowlist: List[str]
 
     active_calls_period: str
@@ -101,7 +103,9 @@ class Config:
 
         timezone_name = os.environ.get("JOB_TIMEZONE", "America/New_York").strip() or "America/New_York"
         dry_run = _env_bool("DRY_RUN", True)
+        full_write = _env_bool("FULL_WRITE", False)
         max_companies = _env_int("MAX_COMPANIES", 250)
+        max_contact_pages = _env_int("MAX_CONTACT_PAGES", 50)
         company_ids_allowlist = _env_csv("COMPANY_IDS")
         slack_webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip() or None
 
@@ -133,7 +137,9 @@ class Config:
             yobi_base_url=yobi_base_url,
             timezone_name=timezone_name,
             dry_run=dry_run,
+            full_write=full_write,
             max_companies=max_companies,
+            max_contact_pages=max_contact_pages,
             company_ids_allowlist=company_ids_allowlist,
             active_calls_period=active_calls_period,
             active_calls_threshold=active_calls_threshold,
@@ -213,6 +219,31 @@ class HubSpotClient:
             if cid is not None:
                 ids.append(str(cid))
         return ids
+
+    def batch_get_contact_company_ids(self, contact_ids: Sequence[str]) -> Dict[str, List[str]]:
+        """
+        Batch fetch contact -> associated company IDs using v4 Associations batch read.
+
+        Endpoint: POST /crm/v4/associations/contacts/companies/batch/read
+        Docs: https://developers.hubspot.com/docs/api-reference/crm-associations-v4/guide
+        """
+        out: Dict[str, List[str]] = {str(cid): [] for cid in contact_ids}
+        for i in range(0, len(contact_ids), 1000):
+            chunk = contact_ids[i : i + 1000]
+            payload = {"inputs": [{"id": str(cid)} for cid in chunk]}
+            data = self._request("POST", "/crm/v4/associations/contacts/companies/batch/read", json_body=payload)
+            for r in data.get("results", []) or []:
+                from_id = str((r.get("from") or {}).get("id") or "")
+                to_list = r.get("to") or []
+                if not from_id:
+                    continue
+                company_ids = []
+                for t in to_list:
+                    tid = t.get("toObjectId") or t.get("id")
+                    if tid is not None:
+                        company_ids.append(str(tid))
+                out[from_id] = company_ids
+        return out
 
     def batch_read_companies(self, company_ids: Sequence[str], properties: Sequence[str]) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
@@ -673,13 +704,19 @@ def _load_companies_from_hubspot(cfg: Config, hubspot: HubSpotClient) -> List[Co
         return rows
 
     # contacts-first universe, stop once we have enough unique companies
-    contact_results = hubspot.search_contacts_lifecyclestage_customer(limit_per_page=100, max_pages=50, properties=("email",))
+    contact_results = hubspot.search_contacts_lifecyclestage_customer(
+        limit_per_page=100,
+        max_pages=cfg.max_contact_pages,
+        properties=("email",),
+    )
+
+    contact_ids = [str(c.get("id")) for c in contact_results if c.get("id") is not None]
+    assoc_map = hubspot.batch_get_contact_company_ids(contact_ids)
+
     company_ids: List[str] = []
     seen: Set[str] = set()
-    for c in contact_results:
-        cid = str(c.get("id"))
-        assoc = hubspot.get_contact_company_ids(cid)
-        for comp_id in assoc:
+    for cid in contact_ids:
+        for comp_id in assoc_map.get(cid, []):
             if comp_id in seen:
                 continue
             seen.add(comp_id)
@@ -779,7 +816,9 @@ def main() -> int:
     print(
         "Config:"
         f" dry_run={cfg.dry_run}"
+        f" full_write={cfg.full_write}"
         f" max_companies={cfg.max_companies}"
+        f" max_contact_pages={cfg.max_contact_pages}"
         f" allowlist={len(cfg.company_ids_allowlist)}"
         f" tz={cfg.timezone_name}"
         f" active_calls={cfg.active_calls_threshold}+/{cfg.active_calls_period}"
@@ -973,22 +1012,25 @@ def main() -> int:
         for a in yobi_anomalies:
             print("ANOMALY:", a)
 
-    # Safety: write-mode requires allowlist
+    # Safety: write-mode requires allowlist unless explicitly full_write=true
     if not cfg.dry_run:
-        if not cfg.company_ids_allowlist:
-            raise RuntimeError("Write-mode requires COMPANY_IDS allowlist to be set.")
-        allow = set(cfg.company_ids_allowlist)
-        updates = [u for u in updates if u[0] in allow]
-        updated_ids = {cid for cid, _ in updates}
-        missing_from_updates = sorted(list(allow - updated_ids))
-        print(f"Write-mode enabled. Will update {len(updates)} allowlisted companies.")
-        if missing_from_updates:
-            print(
-                "WARNING: Some allowlisted company IDs are not eligible for update "
-                "(unmapped, inactive, or missing metrics)."
-            )
-            for cid in missing_from_updates[:20]:
-                print(f"- {cid}")
+        if cfg.company_ids_allowlist:
+            allow = set(cfg.company_ids_allowlist)
+            updates = [u for u in updates if u[0] in allow]
+            updated_ids = {cid for cid, _ in updates}
+            missing_from_updates = sorted(list(allow - updated_ids))
+            print(f"Write-mode enabled. Will update {len(updates)} allowlisted companies.")
+            if missing_from_updates:
+                print(
+                    "WARNING: Some allowlisted company IDs are not eligible for update "
+                    "(unmapped, inactive, or missing metrics)."
+                )
+                for cid in missing_from_updates[:20]:
+                    print(f"- {cid}")
+        else:
+            if not cfg.full_write:
+                raise RuntimeError("Write-mode requires COMPANY_IDS allowlist OR FULL_WRITE=true.")
+            print(f"Write-mode enabled (FULL_WRITE). Will update {len(updates)} eligible companies.")
         hubspot.batch_update_companies(updates)
         print("HubSpot update complete.")
 

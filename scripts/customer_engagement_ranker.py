@@ -801,6 +801,14 @@ def main() -> int:
 
     print(f"Config: dry_run={cfg.dry_run} max_companies={cfg.max_companies} allowlist={len(cfg.company_ids_allowlist)} tz={cfg.timezone_name}")
 
+    # Fail fast on Yobi auth (avoids doing HubSpot work when creds are wrong)
+    try:
+        yobi.login()
+    except Exception as e:
+        print("ERROR: Yobi authentication failed. Check `YOBI_EMAIL` / `YOBI_PASSWORD` secrets.")
+        print(f"Details: {e}")
+        return 1
+
     # Validate HubSpot properties exist
     _validate_hubspot_properties(hubspot)
 
@@ -810,7 +818,12 @@ def main() -> int:
     print(f"Loaded {len(companies)} HubSpot companies to consider.")
 
     # Fetch Yobi stats
-    tenants, metrics_by_tid, yobi_anomalies = _fetch_yobi_metrics(cfg, yobi)
+    try:
+        tenants, metrics_by_tid, yobi_anomalies = _fetch_yobi_metrics(cfg, yobi)
+    except Exception as e:
+        print("ERROR: Failed to fetch Yobi metrics.")
+        print(f"Details: {e}")
+        return 1
     print(f"Loaded {len(tenants)} Yobi tenants; metrics available for {len(metrics_by_tid)} tenants.")
 
     # Map companies to tenant_ids

@@ -940,24 +940,23 @@ def main() -> int:
         for _, cid, d in movers[:10]:
             mover_lines.append(f"{cid}: {'+' if d > 0 else ''}{d}")
 
-        msg = "\n".join(
-            [
-                f"*Customer engagement ranker* ({'dry run' if cfg.dry_run else 'write'})",
-                f"Scored companies: {n} (unmapped: {len(unmapped)})",
-                "",
-                "*Top 10*",
-                *top_lines,
-                "",
-                "*Bottom 10*",
-                *bot_lines,
-                "",
-                "*Biggest movers* (rank delta)",
-                *mover_lines if mover_lines else ["(no prior ranks)"],
-                "",
-                "*Anomalies*",
-                *(yobi_anomalies[:10] if yobi_anomalies else ["(none)"]),
-            ]
-        )
+        msg_lines: List[str] = [
+            f"*Customer engagement ranker* ({'dry run' if cfg.dry_run else 'write'})",
+            f"Scored companies: {n} (unmapped: {len(unmapped)})",
+            "",
+            "*Top 10*",
+            *top_lines,
+            "",
+            "*Bottom 10*",
+            *bot_lines,
+            "",
+            "*Biggest movers* (rank delta)",
+        ]
+        msg_lines.extend(mover_lines if mover_lines else ["(no prior ranks)"])
+        msg_lines.extend(["", "*Anomalies*"])
+        msg_lines.extend(yobi_anomalies[:10] if yobi_anomalies else ["(none)"])
+
+        msg = "\n".join(msg_lines)
         _send_slack(cfg.slack_webhook_url, msg)
 
     return 0

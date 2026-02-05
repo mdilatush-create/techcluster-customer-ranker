@@ -82,6 +82,9 @@ class Config:
     max_companies: int
     company_ids_allowlist: List[str]
 
+    active_calls_period: str
+    active_calls_threshold: int
+
     slack_webhook_url: Optional[str]
     tenant_mapping_overrides: Dict[str, int]  # hubspot company id -> yobi tenant id
 
@@ -97,6 +100,9 @@ class Config:
         max_companies = _env_int("MAX_COMPANIES", 250)
         company_ids_allowlist = _env_csv("COMPANY_IDS")
         slack_webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip() or None
+
+        active_calls_period = (os.environ.get("ACTIVE_CALLS_PERIOD") or "30days").strip() or "30days"
+        active_calls_threshold = _env_int("ACTIVE_CALLS_THRESHOLD", 30)
 
         overrides_raw = os.environ.get("TENANT_MAPPING_OVERRIDES_JSON", "").strip()
         tenant_mapping_overrides: Dict[str, int] = {}
@@ -124,6 +130,8 @@ class Config:
             dry_run=dry_run,
             max_companies=max_companies,
             company_ids_allowlist=company_ids_allowlist,
+            active_calls_period=active_calls_period,
+            active_calls_threshold=active_calls_threshold,
             slack_webhook_url=slack_webhook_url,
             tenant_mapping_overrides=tenant_mapping_overrides,
         )
@@ -767,7 +775,14 @@ def main() -> int:
     hubspot = HubSpotClient(cfg.hubspot_access_token)
     yobi = YobiClient(email=cfg.yobi_email, password=cfg.yobi_password, base_url=cfg.yobi_base_url)
 
-    print(f"Config: dry_run={cfg.dry_run} max_companies={cfg.max_companies} allowlist={len(cfg.company_ids_allowlist)} tz={cfg.timezone_name}")
+    print(
+        "Config:"
+        f" dry_run={cfg.dry_run}"
+        f" max_companies={cfg.max_companies}"
+        f" allowlist={len(cfg.company_ids_allowlist)}"
+        f" tz={cfg.timezone_name}"
+        f" active_calls={cfg.active_calls_threshold}+/{cfg.active_calls_period}"
+    )
 
     # Fail fast on Yobi auth (avoids doing HubSpot work when creds are wrong)
     try:
@@ -810,10 +825,30 @@ def main() -> int:
         for c, reason in unmapped[:10]:
             print(f"- company_id={c.hubspot_company_id} name={c.name!r} domain={c.domain!r} reason={reason}")
 
-    # Build scored list (only those with tenant metrics present)
+    # Determine "active" tenants by call volume (previous 30 days by default)
+    try:
+        active_calls_raw = yobi.calls_by_tenant(period=cfg.active_calls_period)
+        calls_active_window_by_tid = _parse_calls_by_tenant(active_calls_raw)
+    except Exception as e:
+        print("ERROR: Failed to fetch Yobi calls-by-tenant for active filter.")
+        print(f"Details: {e}")
+        return 1
+
+    active_tenant_ids: Set[int] = {
+        int(tid) for tid, calls in calls_active_window_by_tid.items() if _safe_int(calls) > cfg.active_calls_threshold
+    }
+
+    inactive_mapped: List[Tuple[CompanyRow, int]] = [(c, tid) for (c, tid, _) in mapped if int(tid) not in active_tenant_ids]
+    active_mapped: List[Tuple[CompanyRow, int, str]] = [(c, tid, why) for (c, tid, why) in mapped if int(tid) in active_tenant_ids]
+    print(
+        f"Active filter: active_companies={len(active_mapped)} inactive_companies={len(inactive_mapped)} "
+        f"(threshold>{cfg.active_calls_threshold} calls in {cfg.active_calls_period})"
+    )
+
+    # Build scored list (only active + those with tenant metrics present)
     scored: List[Dict[str, Any]] = []
     missing_metrics = 0
-    for c, tid, why in mapped:
+    for c, tid, why in active_mapped:
         m = metrics_by_tid.get(int(tid))
         if not m:
             missing_metrics += 1
@@ -899,7 +934,16 @@ def main() -> int:
             raise RuntimeError("Write-mode requires COMPANY_IDS allowlist to be set.")
         allow = set(cfg.company_ids_allowlist)
         updates = [u for u in updates if u[0] in allow]
+        updated_ids = {cid for cid, _ in updates}
+        missing_from_updates = sorted(list(allow - updated_ids))
         print(f"Write-mode enabled. Will update {len(updates)} allowlisted companies.")
+        if missing_from_updates:
+            print(
+                "WARNING: Some allowlisted company IDs are not eligible for update "
+                "(unmapped, inactive, or missing metrics)."
+            )
+            for cid in missing_from_updates[:20]:
+                print(f"- {cid}")
         hubspot.batch_update_companies(updates)
         print("HubSpot update complete.")
 

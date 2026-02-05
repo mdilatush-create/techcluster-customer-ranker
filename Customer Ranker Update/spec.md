@@ -59,6 +59,10 @@ This spec assumes we can use the existing integration patterns in `/Users/mdilat
 - Primary filter: HubSpot **Contact** `lifecyclestage = "customer"`.
 - For each matching contact, fetch associated **Company** records.
 - Deduplicate companies (a company with multiple customer contacts is still a single ranked customer).
+- **Active customer filter (call-volume based)**:
+  - After mapping HubSpot companies → Yobi tenants, consider a customer **active** if **total calls > 30 in the previous 30 days** (Yobi `period=30days`).
+  - Only **active** customers are included in the weekly ranking + HubSpot updates.
+  - Inactive customers are excluded (we do not clear/overwrite their prior values in v1; we just don’t update them).
 - Optional exclusion filters (recommended to add in v1 to avoid embarrassing rankings):
   - Exclude companies with an explicit boolean flag like `is_internal_test = true`
   - Exclude companies with a churned status property if present (e.g. `customer_status = "churned"`)
@@ -307,6 +311,8 @@ Slack implementation option:
 - `INTERNAL_YOBI_USER_EMAIL_DOMAINS` (comma-separated)
 - `TENANT_MAPPING_OVERRIDES_JSON` (JSON string mapping HubSpot company ids/domains to Yobi tenant ids)
 - `GENERIC_EMAIL_DOMAINS` (override list; defaults include gmail/yahoo/outlook/etc.)
+- `ACTIVE_CALLS_PERIOD` (default `30days`)
+- `ACTIVE_CALLS_THRESHOLD` (default `30`; active if calls > threshold)
 
 ---
 
@@ -348,13 +354,14 @@ Store credentials in GitHub repo **Actions secrets**:
 2. HubSpot: query contacts where `lifecyclestage=customer` and collect associated companies.
 3. HubSpot: read needed company properties (`name`, `domain`, prior rank fields).
 4. Yobi: fetch tenant list; build company→tenant mapping via Identity Resolution.
-5. Compute score/rank/tier deterministically.
-6. Preflight:
+5. Yobi: compute **active** customers via call-volume filter (calls > 30 in prior 30 days).
+6. For active customers, compute score/rank/tier deterministically.
+7. Preflight:
    - validate N > 0
    - validate no missing required stats for mapped tenants
    - validate HubSpot property metadata/types
-7. Write updates to HubSpot (batch if possible).
-8. Send Slack/email summary.
+8. Write updates to HubSpot (batch if possible).
+9. Send Slack/email summary.
 
 ---
 

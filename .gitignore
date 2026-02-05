@@ -1,0 +1,21 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+.env
+
+# Credentials / local config
+config/users.sh
+.mcp.json
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log

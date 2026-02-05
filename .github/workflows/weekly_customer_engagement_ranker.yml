@@ -2,6 +2,25 @@ name: Weekly customer engagement ranker
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no HubSpot writes)"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      company_ids:
+        description: "Comma-separated HubSpot Company IDs to update (required if dry_run=false)"
+        required: false
+        default: ""
+        type: string
+      max_companies:
+        description: "Max companies to consider when company_ids is empty"
+        required: false
+        default: "50"
+        type: string
   schedule:
     # GitHub cron is UTC. This runs Sunday 11:05 UTC.
     # With DST, this will be 06:05 ET in winter and 07:05 ET in summer (drift accepted).
@@ -39,6 +58,9 @@ jobs:
           YOBI_EMAIL: ${{ secrets.YOBI_EMAIL }}
           YOBI_PASSWORD: ${{ secrets.YOBI_PASSWORD }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'true' || inputs.dry_run }}
+          COMPANY_IDS: ${{ github.event_name == 'schedule' && '' || inputs.company_ids }}
+          MAX_COMPANIES: ${{ github.event_name == 'schedule' && '250' || inputs.max_companies }}
         run: |
           python scripts/customer_engagement_ranker.py
 

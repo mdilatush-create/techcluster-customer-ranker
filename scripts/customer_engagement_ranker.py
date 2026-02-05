@@ -573,8 +573,15 @@ def _parse_appointments_by_location(data: Any) -> List[Dict[str, Any]]:
     """
     results = data.get("results", data) if isinstance(data, dict) else data
     if isinstance(results, dict):
-        # common nesting
-        return results.get("stats", results.get("results", [])) or []
+        # common nesting for this endpoint: results.locations
+        return (
+            results.get("locations")
+            or results.get("stats")
+            or results.get("results")
+            or results.get("by_location")
+            or results.get("byLocation")
+            or []
+        )
     if isinstance(results, list):
         return results
     return []
@@ -583,62 +590,35 @@ def _parse_appointments_by_location(data: Any) -> List[Dict[str, Any]]:
 def _aggregate_appointments_by_tenant(
     *,
     appt_rows: List[Dict[str, Any]],
-    locations: List[Dict[str, Any]],
 ) -> Tuple[Dict[int, int], Dict[int, int]]:
     """
     Returns (tenant_total_appointments, tenant_new_patient_appointments)
-    Uses location_id -> tenant_id mapping from /admin/pms/locations.
+    For `/admin/pms/stats/appointments-by-location`, rows include tenant_id directly.
     """
-    loc_to_tenant: Dict[int, int] = {}
-    for loc in locations:
-        lid = loc.get("location_id") or loc.get("locationId") or loc.get("id")
-        tid = loc.get("tenant_id") or loc.get("tenantId")
-        if lid is None or tid is None:
-            continue
-        try:
-            loc_to_tenant[int(lid)] = int(tid)
-        except Exception:
-            continue
-
     total: Dict[int, int] = {}
     newp: Dict[int, int] = {}
 
     for row in appt_rows:
         if not isinstance(row, dict):
             continue
-        lid = row.get("location_id") or row.get("locationId") or row.get("id")
-        if lid is None:
+        tid = row.get("tenant_id") or row.get("tenantId")
+        if tid is None:
             continue
         try:
-            tenant_id = loc_to_tenant.get(int(lid))
+            tenant_id = int(tid)
         except Exception:
-            tenant_id = None
-        if tenant_id is None:
             continue
 
-        # Stats might be nested or flat
+        # Endpoint provides counts directly
         stats = row.get("stats") if isinstance(row.get("stats"), dict) else row
         total_appts = _safe_int(
-            stats.get("total_appointments")
-            or stats.get("totalAppointments")
+            stats.get("appointment_count")
             or stats.get("appointments")
+            or stats.get("total_appointments")
+            or stats.get("totalAppointments")
             or stats.get("total")
         )
-        # new patient: try common keys (counts). If only a rate is available, we cannot derive counts.
-        new_patients_count = None
-        for k in (
-            "new_patient_appointments",
-            "newPatientAppointments",
-            "new_patients",
-            "newPatients",
-            "new_patients_booked",
-            "newPatientsBooked",
-            "new_patient_total",
-        ):
-            if k in stats:
-                new_patients_count = stats.get(k)
-                break
-        new_patients = _safe_int(new_patients_count)
+        new_patients = _safe_int(stats.get("new_patients") or stats.get("newPatients") or stats.get("new_patient_appointments"))
 
         total[tenant_id] = total.get(tenant_id, 0) + total_appts
         newp[tenant_id] = newp.get(tenant_id, 0) + new_patients
@@ -653,11 +633,13 @@ def _aggregate_appointments_by_tenant(
 
 def _compute_week_period_string(now: datetime, tz_name: str) -> str:
     """
-    Yobi period strings are not fully known. We try lastWeek first (if supported),
-    otherwise callers may fall back to 7days.
+    Yobi supports a limited set of `period` values (e.g. yesterday, 7days, 30days, ...).
+    We default to 7days unless overridden via env var `YOBI_PERIOD`.
+
+    Note: this is not an exact Sun–Sat window; see spec for future improvement.
     """
     _ = now, tz_name
-    return "lastWeek"
+    return (os.environ.get("YOBI_PERIOD") or "7days").strip() or "7days"
 
 
 def _load_companies_from_hubspot(cfg: Config, hubspot: HubSpotClient) -> List[CompanyRow]:
@@ -723,33 +705,19 @@ def _fetch_yobi_metrics(cfg: Config, yobi: YobiClient) -> Tuple[List[Dict[str, A
 
     now = _utc_now()
     period = _compute_week_period_string(now, cfg.timezone_name)
-    fallback_period = "7days"
 
     # Calls
-    try:
-        calls_raw = yobi.calls_by_tenant(period=period)
-    except Exception as e:
-        anomalies.append(f"calls_by_tenant period={period} failed; falling back to {fallback_period}: {e}")
-        calls_raw = yobi.calls_by_tenant(period=fallback_period)
+    calls_raw = yobi.calls_by_tenant(period=period)
     calls_by_tid = _parse_calls_by_tenant(calls_raw)
 
     # Tasks created
-    try:
-        tasks_raw = yobi.tasks_created(period=period)
-    except Exception as e:
-        anomalies.append(f"tasks_created period={period} failed; falling back to {fallback_period}: {e}")
-        tasks_raw = yobi.tasks_created(period=fallback_period)
+    tasks_raw = yobi.tasks_created(period=period)
     tasks_by_tid = _parse_tasks_created(tasks_raw)
 
     # Appointments
-    locations = yobi.get_pms_locations()
-    try:
-        appt_raw = yobi.appointments_by_location(period=period)
-    except Exception as e:
-        anomalies.append(f"appointments_by_location period={period} failed; falling back to {fallback_period}: {e}")
-        appt_raw = yobi.appointments_by_location(period=fallback_period)
+    appt_raw = yobi.appointments_by_location(period=period)
     appt_rows = _parse_appointments_by_location(appt_raw)
-    appts_total_by_tid, appts_newp_by_tid = _aggregate_appointments_by_tenant(appt_rows=appt_rows, locations=locations)
+    appts_total_by_tid, appts_newp_by_tid = _aggregate_appointments_by_tenant(appt_rows=appt_rows)
 
     # Build metrics objects for every tenant we have any data for
     all_tids: Set[int] = set()

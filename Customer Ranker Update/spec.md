@@ -4,7 +4,7 @@
 We will build a weekly batch job that pulls customer usage metrics from Yobi and writes **three** engagement properties onto the corresponding **HubSpot Company** record:
 
 - `customer_engagement_score` (integer)
-- `customer_engagement_rank` (string, e.g. `"26 out of 150"`)
+- `customer_engagement_rank` (string, e.g. `"26 of 150"`)
 - `customer_engagement_tier` (string label: `"Top 30%"`, `"Middle 40%"`, `"Bottom 30%"`)
 
 Customers are ranked weekly by a weighted score computed from:
@@ -41,7 +41,7 @@ This spec assumes we can use the existing integration patterns in `/Users/mdilat
 - **Customer universe**: derived from HubSpot **Contacts** with `lifecyclestage=customer`, then mapped to their associated **Company** records (and any additional exclusions defined below).
 - **Yobi ↔ HubSpot join**: do **not** rely on HubSpot storing Yobi tenant IDs. Instead, map HubSpot companies to Yobi tenants using deterministic matching (domain/email-domain/name) + explicit overrides (see Identity Resolution).
 - **Yobi activity scope**: customer user activity only (exclude our internal staff/service accounts where applicable).
-- **Rank format**: human-readable string like `"26 out of 150"`.
+- **Rank format**: human-readable string like `"26 of 150"`.
 - **Tie-breaking**: break ties deterministically by metric priority: new patients > total appointments > tasks > calls, then stable by HubSpot company id.
 - **Update semantics**: fail-fast; if a critical step fails, no HubSpot writes.
 - **Summary**: weekly Slack/email includes top 10, bottom 10, movers vs prior week, anomalies.
@@ -71,7 +71,7 @@ This spec assumes we can use the existing integration patterns in `/Users/mdilat
 **Properties to read**
 - Contact: `lifecyclestage` (and optionally email for domain-based mapping).
 - Company: `name`, `domain` (critical for mapping), plus:
-  - `customer_engagement_rank` (for prior-week mover deltas; parse `"X out of N"` if present).
+- `customer_engagement_rank` (for prior-week mover deltas; parse `"X of N"`; accept legacy `"X out of N"` if present).
 - `customer_engagement_score` (optional; for sanity checks).
 - `customer_engagement_tier` (optional).
 
@@ -230,7 +230,7 @@ All component metrics are integers for the weekly window, and `customer_engageme
   5. stable tie-breaker: HubSpot company id (ascending) to guarantee deterministic output
 - Assign rank as 1..N after sorting.
 
-Store `customer_engagement_rank` as: `"{rank} out of {N}"`.
+Store `customer_engagement_rank` as: `"{rank} of {N}"`.
 
 ### Tier
 Tier is based on rank position:
@@ -264,7 +264,7 @@ If any of the above fails, exit non-zero and send an alert (Slack/email).
 ### Update payload
 For each company:
 - `customer_engagement_score`: integer
-- `customer_engagement_rank`: `"X out of N"`
+- `customer_engagement_rank`: `"X of N"`
 - `customer_engagement_tier`: one of the 3 labels
 
 ### Batching / rate limits
@@ -396,7 +396,7 @@ If either verification fails, the job must not ship until we revise the approach
 - **Unit tests**:
   - week window computation for multiple dates (including DST transitions)
   - tier boundary math for various N
-  - parsing `"X out of N"` for prior rank
+  - parsing `"X of N"` (and legacy `"X out of N"`) for prior rank
   - deterministic sorting / tie-breaks
 - **Integration tests (manual / staged)**:
   - run against a small allowlist of companies (5–10) and verify HubSpot updates

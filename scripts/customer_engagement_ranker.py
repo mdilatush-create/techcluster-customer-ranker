@@ -477,7 +477,8 @@ class TenantMetrics:
 def _parse_prev_rank(prev_rank_raw: str) -> Optional[int]:
     if not prev_rank_raw:
         return None
-    m = re.match(r"^\s*(\d+)\s+out\s+of\s+\d+\s*$", prev_rank_raw, flags=re.I)
+    # Accept both legacy "X out of N" and new "X of N" formats.
+    m = re.match(r"^\s*(\d+)\s+(?:out\s+of|of)\s+\d+\s*$", prev_rank_raw, flags=re.I)
     if not m:
         return None
     try:
@@ -919,8 +920,9 @@ def main() -> int:
             f"(threshold>{cfg.active_calls_threshold} calls in {cfg.active_calls_period})"
         )
 
+        # Rank by score desc, then deterministic tie-breakers.
         active_metrics.sort(
-            key=lambda m: (-m.new_patient_appointments, -m.total_appointments, -m.tasks_created, -m.total_calls, m.tenant_id)
+            key=lambda m: (-m.score, -m.new_patient_appointments, -m.total_appointments, -m.tasks_created, -m.total_calls, m.tenant_id)
         )
 
         n = len(active_metrics)
@@ -1018,9 +1020,10 @@ def main() -> int:
                 print("ANOMALY:", a)
         return 0
 
-    # Deterministic sort per spec (prioritize metrics, then company_id)
+    # Rank by score desc, then deterministic tie-breakers.
     scored.sort(
         key=lambda r: (
+            -r["metrics"].score,
             -r["metrics"].new_patient_appointments,
             -r["metrics"].total_appointments,
             -r["metrics"].tasks_created,
@@ -1048,7 +1051,7 @@ def main() -> int:
                 c.hubspot_company_id,
                 {
                     "customer_engagement_score": str(m.score),  # HubSpot numeric props accept stringified numbers
-                    "customer_engagement_rank": f"{idx} out of {n}",
+                    "customer_engagement_rank": f"{idx} of {n}",
                     "customer_engagement_tier": tier,
                 },
             )
